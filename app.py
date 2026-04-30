@@ -35,7 +35,7 @@ st.markdown("""
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     SHEET_ID = st.secrets["SPREADSHEET_ID"]
-    GCP_CREDS_DICT = st.secrets["gcp_service_account"]
+    GCP_CREDS_DICT = st.secrets["GCP_JSON"]
 except:
     st.error("⚠️ Secrets（秘密の金庫）が設定されていません。クラウド上で設定してください。")
     st.stop()
