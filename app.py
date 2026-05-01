@@ -66,9 +66,9 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. Googleスプレッドシート連携
+# 2. Googleスプレッドシート連携（完全キャッシュ版）
 # ==========================================
-@st.cache_resource(ttl=600)
+@st.cache_resource(ttl=600) # 10分ごとに再接続
 def init_gspread():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -76,29 +76,34 @@ def init_gspread():
     ]
     credentials = Credentials.from_service_account_info(GCP_CREDS_DICT, scopes=scopes)
     gc = gspread.authorize(credentials)
-    
-    # 👇 追加：スプレッドシートのIDを開く作業も、このキャッシュバリアの中に入れる！
     sh = gc.open_by_key(SHEET_ID)
-    return sh
 
-# 👇 修正：gcを消して、shを直接受け取るようにする
-sh = init_gspread()
+    # シートの有無を確認・作成する処理もキャッシュ内で行う
+    def ensure_ws(title, headers):
+        try:
+            return sh.worksheet(title)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sh.add_worksheet(title=title, rows=1000, cols=20)
+            ws.append_row(headers)
+            return ws
 
-# 必要なシート（タブ）がなければ自動作成する
+    return {
+        "receipts": ensure_ws("receipts", ['処理日時', 'レシート日付', '店舗名', '合計金額', '商品名', '金額', '大分類', '小分類']),
+        "income": ensure_ws("income", ['年月', '金額']),
+        "fixed": ensure_ws("fixed_costs", ['項目名', '金額']),
+        "settings": ensure_ws("settings", ['項目', '値'])
+    }
 
-def ensure_worksheet(title, headers):
-    try:
-        ws = sh.worksheet(title)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=1000, cols=20)
-        ws.append_row(headers)
-    return ws
+# キャッシュからシート情報を取り出す（通信ゼロ！）
+sheets = init_gspread()
+ws_receipts = sheets["receipts"]
+ws_income = sheets["income"]
+ws_fixed = sheets["fixed"]
+ws_settings = sheets["settings"]
 
-ws_receipts = ensure_worksheet("receipts", ['処理日時', 'レシート日付', '店舗名', '合計金額', '商品名', '金額', '大分類', '小分類'])
-ws_income = ensure_worksheet("income", ['年月', '金額'])
-ws_fixed = ensure_worksheet("fixed_costs", ['項目名', '金額'])
-ws_settings = ensure_worksheet("settings", ['項目', '値'])
-
+# ------------------------------------------
+# データ読み書き関数群（すべてキャッシュ化）
+# ------------------------------------------
 @st.cache_data(ttl=60)
 def load_receipts():
     data = ws_receipts.get_all_records()
@@ -109,14 +114,17 @@ def load_receipts():
     df['金額'] = pd.to_numeric(df['金額'], errors='coerce').fillna(0).astype(int)
     return df
 
+@st.cache_data(ttl=60)
 def load_income():
     data = ws_income.get_all_records()
     return pd.DataFrame(data) if data else pd.DataFrame(columns=['年月', '金額'])
 
+@st.cache_data(ttl=60)
 def load_fixed_costs():
     data = ws_fixed.get_all_records()
     return pd.DataFrame(data) if data else pd.DataFrame(columns=['項目名', '金額'])
 
+@st.cache_data(ttl=60)
 def load_budget():
     data = ws_settings.get_all_records()
     for row in data:
@@ -128,6 +136,7 @@ def save_df_to_sheet(ws, df):
     ws.clear()
     ws.update([df.columns.values.tolist()] + df.values.tolist())
 
+# 各種データをロード
 raw_df = load_receipts()
 income_df = load_income()
 fixed_df = load_fixed_costs()
@@ -148,7 +157,8 @@ PROMPT = """
 def clean_json_string(raw_text):
     text = raw_text.strip()
     if text.startswith("```json"): text = text[7:]
-    if text.endswith("```"): text = text[:-3]
+    if text.endswith("
+```"): text = text[:-3]
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text).strip()
 
 def process_uploaded_files(uploaded_files, current_df):
@@ -156,7 +166,7 @@ def process_uploaded_files(uploaded_files, current_df):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # 【追加機能】すでに登録されているレシートの組み合わせをリストアップ
+    # すでに登録されているレシートの組み合わせをリストアップ
     existing_receipts = set()
     if not current_df.empty:
         for _, row in current_df.iterrows():
@@ -180,20 +190,16 @@ def process_uploaded_files(uploaded_files, current_df):
             
             data = json.loads(clean_json_string(response.text))
             
-            # 抽出したデータ
             r_date = data.get('receipt_date', '').replace('/', '-')
             s_name = data.get('store_name', '')
             t_amt = data.get('total_amount', 0)
             
-            # 重複チェックの鍵（日付 + 店舗名 + 合計金額）
             dup_key = f"{r_date}_{s_name}_{t_amt}"
             
             if dup_key in existing_receipts:
-                # 完全に一致する過去データがあればスキップ
                 results.append({"file": uploaded_file.name, "status": "duplicate", "msg": f"重複スキップ: {s_name} ({t_amt}円)"})
             else:
-                # 新規レシートの場合
-                existing_receipts.add(dup_key) # 同時アップロード同士の重複も防ぐ
+                existing_receipts.add(dup_key)
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 items = data.get('items', [])
                 
@@ -218,11 +224,9 @@ def process_uploaded_files(uploaded_files, current_df):
     if new_rows:
         ws_receipts.append_rows(new_rows)
 
-    # 処理結果を保存
     st.session_state["upload_results"] = results
     status_text.text("✅ 処理が完了しました。")
     
-    # 1つでも「error」があればFalseを返す（duplicateはエラー扱いしない）
     has_error = any(r['status'] == 'error' for r in results)
     return not has_error
 
@@ -242,7 +246,6 @@ tab_input, tab_monthly, tab_trend, tab_settings = st.tabs([
 # 📤 タブ1：レシート入力
 # ------------------------------------------
 with tab_input:
-    # --- 💡 ここから ---
     if st.session_state.get("upload_results"):
         st.markdown("### 📝 前回の処理結果")
         has_error = False
@@ -280,12 +283,9 @@ with tab_input:
             st.cache_data.clear()
             
             if is_all_success_or_dup:
-                # 全て成功（または重複スキップ）なら、アップローダーの鍵を変えて空っぽにする
                 st.session_state["uploader_key"] += 1
             
-            # 【修正】成功でもエラーでも、必ず画面をリフレッシュして一番上のレポートを描画させる
             st.rerun()
-
 
 # ------------------------------------------
 # 📊 タブ2：今月の収支
