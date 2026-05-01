@@ -16,6 +16,24 @@ import gspread
 # ==========================================
 st.set_page_config(page_title="スマート家計簿ダッシュボード", layout="wide", page_icon="🧾")
 
+# ==========================================
+# 0.5. セキュリティロック（暗証番号）
+# ==========================================
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.markdown("<h2 style='text-align: center;'>🔒 秘密の家計簿</h2>", unsafe_allow_html=True)
+    pin_input = st.text_input("暗証番号を入力してください", type="password")
+    
+    # ⚠️ 「1234」の部分を、お好きな暗証番号に変更してください！
+    if pin_input == "1234":  
+        st.session_state["authenticated"] = True
+        st.rerun()
+    elif pin_input:
+        st.error("❌ 暗証番号が違います")
+        
+    st.stop() # 認証されるまで、これより下のプログラム（家計簿画面）は一切実行させない
 st.markdown("""
 <style>
     .stApp { background-color: #121212; color: #E0E0E0; }
