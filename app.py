@@ -27,7 +27,7 @@ if not st.session_state["authenticated"]:
     pin_input = st.text_input("暗証番号を入力してください", type="password")
     
     # ⚠️ 「1234」の部分を、お好きな暗証番号に変更してください！
-    if pin_input == "1234":  
+    if pin_input == st.secrets["APP_PIN"]:
         st.session_state["authenticated"] = True
         st.rerun()
     elif pin_input:
