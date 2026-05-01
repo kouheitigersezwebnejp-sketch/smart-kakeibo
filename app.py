@@ -237,17 +237,22 @@ tab_input, tab_monthly, tab_trend, tab_settings = st.tabs([
 # 📤 タブ1：レシート入力
 # ------------------------------------------
 with tab_input:
-    # 【追加機能】前回の処理結果レポートを表示
+    # --- 💡 ここから ---
     if st.session_state.get("upload_results"):
         st.markdown("### 📝 前回の処理結果")
+        has_error = False
         for res in st.session_state["upload_results"]:
             if res['status'] == 'success':
                 st.success(f"✅ {res['file']} -> {res['msg']}")
             elif res['status'] == 'duplicate':
-                st.warning(f"⏩ {res['file']} -> {res['msg']} (すでに登録済みのためスキップしました)")
+                st.warning(f"⏩ {res['file']} -> {res['msg']} (登録済みのためスキップしました)")
             else:
                 st.error(f"❌ {res['file']} -> {res['msg']}")
+                has_error = True
         
+        if has_error:
+            st.error("⚠️ エラーが発生したため、アップローダーに画像を残しています。結果を確認してください。")
+
         if st.button("結果の表示を消す"):
             st.session_state["upload_results"] = None
             st.rerun()
@@ -265,19 +270,17 @@ with tab_input:
     
     if uploaded_files:
         if st.button("🚀 このレシートをAIで解析する", type="primary"):
-            # 現在のデータを渡して重複チェックさせる
             is_all_success_or_dup = process_uploaded_files(uploaded_files, raw_df)
             
             st.cache_data.clear()
             
             if is_all_success_or_dup:
-                # 成功＆重複スキップのみの場合は、アップローダーを綺麗にする
-                time.sleep(1.5)
+                # 全て成功（または重複スキップ）なら、アップローダーの鍵を変えて空っぽにする
                 st.session_state["uploader_key"] += 1
-                st.rerun()
-            else:
-                # エラー（読み取り不能など）があった場合は画像を残す
-                st.warning("⚠️ 一部の画像でエラーが発生したため、画像を残しています。上の結果レポートを確認してください。")
+            
+            # 【修正】成功でもエラーでも、必ず画面をリフレッシュして一番上のレポートを描画させる
+            st.rerun()
+
 
 # ------------------------------------------
 # 📊 タブ2：今月の収支
