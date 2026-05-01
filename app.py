@@ -17,16 +17,19 @@ import gspread
 st.set_page_config(page_title="スマート家計簿ダッシュボード", layout="wide", page_icon="🧾")
 
 # ==========================================
-# 0.5. セキュリティロック（暗証番号）
+# 0.5. セキュリティロックと状態管理
 # ==========================================
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
+
+# 画像アップローダーをリセットするための魔法の鍵
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
 
 if not st.session_state["authenticated"]:
     st.markdown("<h2 style='text-align: center;'>🔒 秘密の家計簿</h2>", unsafe_allow_html=True)
     pin_input = st.text_input("暗証番号を入力してください", type="password")
     
-    # ⚠️ 「1234」の部分を、お好きな暗証番号に変更してください！
     if pin_input == st.secrets["APP_PIN"]:
         st.session_state["authenticated"] = True
         st.rerun()
@@ -34,6 +37,7 @@ if not st.session_state["authenticated"]:
         st.error("❌ 暗証番号が違います")
         
     st.stop() # 認証されるまで、これより下のプログラム（家計簿画面）は一切実行させない
+
 st.markdown("""
 <style>
     .stApp { background-color: #121212; color: #E0E0E0; }
@@ -49,7 +53,6 @@ st.markdown("""
 # ==========================================
 # 1. セキュリティ（秘密の金庫から鍵を取り出す）
 # ==========================================
-# ローカルテスト用（secretsがない場合は空文字を返す）
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     SHEET_ID = st.secrets["SPREADSHEET_ID"]
@@ -67,7 +70,6 @@ def init_gspread():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    # Secretsから辞書型で読み込んだ認証情報を使う
     credentials = Credentials.from_service_account_info(GCP_CREDS_DICT, scopes=scopes)
     gc = gspread.authorize(credentials)
     return gc
@@ -185,7 +187,9 @@ def process_uploaded_files(uploaded_files):
         ws_receipts.append_rows(new_rows)
 
     status_text.text(f"✅ 完了！ {success_count}枚のレシートをデータ化しました。")
-    return True
+    
+    # すべて成功した場合はTrue、1つでもエラーがあればFalseを返す
+    return success_count == total_files
 
 # ==========================================
 # 4. メイン画面UI
@@ -205,13 +209,30 @@ tab_input, tab_monthly, tab_trend, tab_settings = st.tabs([
 with tab_input:
     st.subheader("📸 レシートの追加")
     st.markdown("スマホの場合は「ファイルを参照」を押すと、**その場でカメラを起動**できます。複数枚の同時アップロードも可能です。")
-    uploaded_files = st.file_uploader("レシート画像をアップロード", type=['png', 'jpg', 'jpeg', 'webp'], accept_multiple_files=True)
+    
+    # 🌟 keyにセッションステートを使うことで、後からリセットできるようにする
+    uploaded_files = st.file_uploader(
+        "レシート画像をアップロード", 
+        type=['png', 'jpg', 'jpeg', 'webp'], 
+        accept_multiple_files=True, 
+        key=f"uploader_{st.session_state['uploader_key']}"
+    )
+    
     if uploaded_files:
         if st.button("🚀 このレシートをAIで解析する", type="primary"):
-            if process_uploaded_files(uploaded_files):
-                st.cache_data.clear()
-                time.sleep(2)
+            is_all_success = process_uploaded_files(uploaded_files)
+            
+            # 成功した分がスプレッドシートに入っているので、一旦キャッシュをクリア
+            st.cache_data.clear()
+            
+            if is_all_success:
+                # 全て成功した場合：アップローダーの鍵を更新して、画像を綺麗に消し去る
+                time.sleep(1.5)
+                st.session_state["uploader_key"] += 1
                 st.rerun()
+            else:
+                # エラーがあった場合：画面をリセットせず、エラーメッセージと画像を残す
+                st.warning("⚠️ 一部の画像でエラーが発生したため、画像を残しています。エラー内容を確認してください。")
 
 # ------------------------------------------
 # 📊 タブ2：今月の収支
