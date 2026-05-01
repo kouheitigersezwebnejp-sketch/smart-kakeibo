@@ -156,9 +156,8 @@ PROMPT = """
 
 def clean_json_string(raw_text):
     text = raw_text.strip()
-    if text.startswith("```json"): text = text[7:]
-    if text.endswith("
-```"): text = text[:-3]
+    if text.startswith('```json'): text = text[7:]
+    if text.endswith('```'): text = text[:-3]
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text).strip()
 
 def process_uploaded_files(uploaded_files, current_df):
