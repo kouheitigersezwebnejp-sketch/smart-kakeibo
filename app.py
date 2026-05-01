@@ -76,10 +76,15 @@ def init_gspread():
     ]
     credentials = Credentials.from_service_account_info(GCP_CREDS_DICT, scopes=scopes)
     gc = gspread.authorize(credentials)
-    return gc
+    
+    # 👇 追加：スプレッドシートのIDを開く作業も、このキャッシュバリアの中に入れる！
+    sh = gc.open_by_key(SHEET_ID)
+    return sh
 
-gc = init_gspread()
-sh = gc.open_by_key(SHEET_ID)
+# 👇 修正：gcを消して、shを直接受け取るようにする
+sh = init_gspread()
+
+# 必要なシート（タブ）がなければ自動作成する
 
 def ensure_worksheet(title, headers):
     try:
