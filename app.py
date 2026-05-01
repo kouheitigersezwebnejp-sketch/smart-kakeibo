@@ -26,6 +26,10 @@ if "authenticated" not in st.session_state:
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 
+# 前回のアップロード結果を保持するハコ
+if "upload_results" not in st.session_state:
+    st.session_state["upload_results"] = None
+
 if not st.session_state["authenticated"]:
     st.markdown("<h2 style='text-align: center;'>🔒 秘密の家計簿</h2>", unsafe_allow_html=True)
     pin_input = st.text_input("暗証番号を入力してください", type="password")
@@ -36,7 +40,7 @@ if not st.session_state["authenticated"]:
     elif pin_input:
         st.error("❌ 暗証番号が違います")
         
-    st.stop() # 認証されるまで、これより下のプログラム（家計簿画面）は一切実行させない
+    st.stop() 
 
 st.markdown("""
 <style>
@@ -51,7 +55,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. セキュリティ（秘密の金庫から鍵を取り出す）
+# 1. セキュリティ
 # ==========================================
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -62,9 +66,9 @@ except Exception as e:
     st.stop()
 
 # ==========================================
-# 2. Googleスプレッドシート連携（データベース化）
+# 2. Googleスプレッドシート連携
 # ==========================================
-@st.cache_resource(ttl=600) # 10分ごとに再接続
+@st.cache_resource(ttl=600)
 def init_gspread():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -77,7 +81,6 @@ def init_gspread():
 gc = init_gspread()
 sh = gc.open_by_key(SHEET_ID)
 
-# 必要なシート（タブ）がなければ自動作成する
 def ensure_worksheet(title, headers):
     try:
         ws = sh.worksheet(title)
@@ -91,9 +94,6 @@ ws_income = ensure_worksheet("income", ['年月', '金額'])
 ws_fixed = ensure_worksheet("fixed_costs", ['項目名', '金額'])
 ws_settings = ensure_worksheet("settings", ['項目', '値'])
 
-# ------------------------------------------
-# データ読み書き関数群
-# ------------------------------------------
 @st.cache_data(ttl=60)
 def load_receipts():
     data = ws_receipts.get_all_records()
@@ -117,21 +117,19 @@ def load_budget():
     for row in data:
         if row.get('項目') == 'monthly_budget':
             return int(row.get('値', 100000))
-    return 100000 # デフォルト
+    return 100000
 
 def save_df_to_sheet(ws, df):
-    """データフレームの中身でシートを丸ごと上書きする"""
     ws.clear()
     ws.update([df.columns.values.tolist()] + df.values.tolist())
 
-# 各種データをロード
 raw_df = load_receipts()
 income_df = load_income()
 fixed_df = load_fixed_costs()
 budget = load_budget()
 
 # ==========================================
-# 3. AI処理エンジン
+# 3. AI処理エンジン ＋ 重複チェック
 # ==========================================
 PROMPT = """
 あなたは高精度な家計簿アシスタントです。レシート画像から購入品目を抽出し、JSONで出力してください。
@@ -148,14 +146,23 @@ def clean_json_string(raw_text):
     if text.endswith("```"): text = text[:-3]
     return re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text).strip()
 
-def process_uploaded_files(uploaded_files):
+def process_uploaded_files(uploaded_files, current_df):
     client = genai.Client(api_key=API_KEY)
     progress_bar = st.progress(0)
     status_text = st.empty()
-    success_count = 0
+    
+    # 【追加機能】すでに登録されているレシートの組み合わせをリストアップ
+    existing_receipts = set()
+    if not current_df.empty:
+        for _, row in current_df.iterrows():
+            d_val = row['レシート日付']
+            d_str = d_val.strftime('%Y-%m-%d') if pd.notna(d_val) else ""
+            existing_receipts.add(f"{d_str}_{row['店舗名']}_{row['合計金額']}")
+
+    results = [] # 処理結果のレポート用
+    new_rows = []
     total_files = len(uploaded_files)
 
-    new_rows = []
     for i, uploaded_file in enumerate(uploaded_files):
         status_text.text(f"処理中 ({i+1}/{total_files}): {uploaded_file.name} をAIが解析しています...")
         try:
@@ -167,29 +174,52 @@ def process_uploaded_files(uploaded_files):
             )
             
             data = json.loads(clean_json_string(response.text))
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for item in data.get('items', []):
-                new_rows.append([
-                    now, data.get('receipt_date', ''), data.get('store_name', ''), data.get('total_amount', 0),
-                    item.get('item_name', ''), item.get('price', 0), item.get('main_category', ''), item.get('sub_category', '')
-                ])
-            success_count += 1
+            
+            # 抽出したデータ
+            r_date = data.get('receipt_date', '').replace('/', '-')
+            s_name = data.get('store_name', '')
+            t_amt = data.get('total_amount', 0)
+            
+            # 重複チェックの鍵（日付 + 店舗名 + 合計金額）
+            dup_key = f"{r_date}_{s_name}_{t_amt}"
+            
+            if dup_key in existing_receipts:
+                # 完全に一致する過去データがあればスキップ
+                results.append({"file": uploaded_file.name, "status": "duplicate", "msg": f"重複スキップ: {s_name} ({t_amt}円)"})
+            else:
+                # 新規レシートの場合
+                existing_receipts.add(dup_key) # 同時アップロード同士の重複も防ぐ
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                items = data.get('items', [])
+                
+                if not items:
+                    results.append({"file": uploaded_file.name, "status": "error", "msg": "商品データが読み取れませんでした"})
+                else:
+                    for item in items:
+                        new_rows.append([
+                            now, r_date, s_name, t_amt,
+                            item.get('item_name', ''), item.get('price', 0), item.get('main_category', ''), item.get('sub_category', '')
+                        ])
+                    results.append({"file": uploaded_file.name, "status": "success", "msg": f"保存完了: {s_name} ({t_amt}円)"})
+                    
         except Exception as e:
-            st.error(f"[{uploaded_file.name}] の処理中にエラーが発生しました: {e}")
+            results.append({"file": uploaded_file.name, "status": "error", "msg": f"読取エラーが発生しました"})
         
         progress_bar.progress((i + 1) / total_files)
         if i < total_files - 1:
-            status_text.text("API制限を避けるため待機中...")
+            status_text.text("AIの思考を整理中... (数秒お待ちください)")
             time.sleep(15)
 
     if new_rows:
-        # スプレッドシートの末尾に追記
         ws_receipts.append_rows(new_rows)
 
-    status_text.text(f"✅ 完了！ {success_count}枚のレシートをデータ化しました。")
+    # 処理結果を保存
+    st.session_state["upload_results"] = results
+    status_text.text("✅ 処理が完了しました。")
     
-    # すべて成功した場合はTrue、1つでもエラーがあればFalseを返す
-    return success_count == total_files
+    # 1つでも「error」があればFalseを返す（duplicateはエラー扱いしない）
+    has_error = any(r['status'] == 'error' for r in results)
+    return not has_error
 
 # ==========================================
 # 4. メイン画面UI
@@ -207,10 +237,25 @@ tab_input, tab_monthly, tab_trend, tab_settings = st.tabs([
 # 📤 タブ1：レシート入力
 # ------------------------------------------
 with tab_input:
+    # 【追加機能】前回の処理結果レポートを表示
+    if st.session_state.get("upload_results"):
+        st.markdown("### 📝 前回の処理結果")
+        for res in st.session_state["upload_results"]:
+            if res['status'] == 'success':
+                st.success(f"✅ {res['file']} -> {res['msg']}")
+            elif res['status'] == 'duplicate':
+                st.warning(f"⏩ {res['file']} -> {res['msg']} (すでに登録済みのためスキップしました)")
+            else:
+                st.error(f"❌ {res['file']} -> {res['msg']}")
+        
+        if st.button("結果の表示を消す"):
+            st.session_state["upload_results"] = None
+            st.rerun()
+        st.markdown("---")
+
     st.subheader("📸 レシートの追加")
     st.markdown("スマホの場合は「ファイルを参照」を押すと、**その場でカメラを起動**できます。複数枚の同時アップロードも可能です。")
     
-    # 🌟 keyにセッションステートを使うことで、後からリセットできるようにする
     uploaded_files = st.file_uploader(
         "レシート画像をアップロード", 
         type=['png', 'jpg', 'jpeg', 'webp'], 
@@ -220,19 +265,19 @@ with tab_input:
     
     if uploaded_files:
         if st.button("🚀 このレシートをAIで解析する", type="primary"):
-            is_all_success = process_uploaded_files(uploaded_files)
+            # 現在のデータを渡して重複チェックさせる
+            is_all_success_or_dup = process_uploaded_files(uploaded_files, raw_df)
             
-            # 成功した分がスプレッドシートに入っているので、一旦キャッシュをクリア
             st.cache_data.clear()
             
-            if is_all_success:
-                # 全て成功した場合：アップローダーの鍵を更新して、画像を綺麗に消し去る
+            if is_all_success_or_dup:
+                # 成功＆重複スキップのみの場合は、アップローダーを綺麗にする
                 time.sleep(1.5)
                 st.session_state["uploader_key"] += 1
                 st.rerun()
             else:
-                # エラーがあった場合：画面をリセットせず、エラーメッセージと画像を残す
-                st.warning("⚠️ 一部の画像でエラーが発生したため、画像を残しています。エラー内容を確認してください。")
+                # エラー（読み取り不能など）があった場合は画像を残す
+                st.warning("⚠️ 一部の画像でエラーが発生したため、画像を残しています。上の結果レポートを確認してください。")
 
 # ------------------------------------------
 # 📊 タブ2：今月の収支
@@ -325,7 +370,7 @@ with tab_trend:
         st.bar_chart(pivot_main)
 
 # ------------------------------------------
-# ⚙️ タブ4：設定・データ編集（スプレッドシート連動版）
+# ⚙️ タブ4：設定・データ編集
 # ------------------------------------------
 with tab_settings:
     st.subheader("バックヤード設定 (クラウド同期)")
@@ -357,7 +402,6 @@ with tab_settings:
         if not raw_df.empty:
             edited_raw_df = st.data_editor(raw_df, num_rows="dynamic", width='stretch', key="raw")
             if st.button("💾 上記の内容で生データを上書き保存"):
-                # 不要なカラム（年月など）を落としてから保存
                 columns_to_save = ['処理日時', 'レシート日付', '店舗名', '合計金額', '商品名', '金額', '大分類', '小分類']
                 save_df_to_sheet(ws_receipts, edited_raw_df[columns_to_save])
                 st.cache_data.clear()
