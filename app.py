@@ -17,11 +17,8 @@ import gspread
 st.set_page_config(page_title="スマート家計簿ダッシュボード", layout="wide", page_icon="🧾")
 
 # ==========================================
-# 0.5. セキュリティロックと状態管理
+# 0.5. セキュリティロック（シークレットURL方式）
 # ==========================================
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
 # 画像アップローダーをリセットするための魔法の鍵
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
@@ -30,16 +27,13 @@ if "uploader_key" not in st.session_state:
 if "upload_results" not in st.session_state:
     st.session_state["upload_results"] = None
 
-if not st.session_state["authenticated"]:
+# URLの末尾（?token=〇〇）から暗号を取得する
+token = st.query_params.get("token")
+
+# 金庫の中の暗号と一致しない場合は、ここでシャットアウト！
+if token != st.secrets["APP_TOKEN"]:
     st.markdown("<h2 style='text-align: center;'>🔒 秘密の家計簿</h2>", unsafe_allow_html=True)
-    pin_input = st.text_input("暗証番号を入力してください", type="password")
-    
-    if pin_input == st.secrets["APP_PIN"]:
-        st.session_state["authenticated"] = True
-        st.rerun()
-    elif pin_input:
-        st.error("❌ 暗証番号が違います")
-        
+    st.error("❌ アクセス権がありません。専用のURLからアクセスしてください。")
     st.stop() 
 
 st.markdown("""
@@ -53,6 +47,11 @@ st.markdown("""
     .stButton>button { width: 100%; font-weight: bold; height: 50px; }
 </style>
 """, unsafe_allow_html=True)
+
+# ==========================================
+# 1. セキュリティ
+# ==========================================
+# （ここから下は今までと同じコードが続きます）
 
 # ==========================================
 # 1. セキュリティ
